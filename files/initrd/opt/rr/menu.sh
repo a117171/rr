@@ -11,8 +11,6 @@
 [ -z "${WORK_PATH}" ] || [ ! -d "${WORK_PATH}/include" ] && WORK_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 . "${WORK_PATH}/include/functions.sh"
-. "${WORK_PATH}/include/addons.sh"
-. "${WORK_PATH}/include/modules.sh"
 
 [ -z "${LOADER_DISK}" ] && die "$(TEXT "Loader is not init!")"
 
@@ -139,7 +137,7 @@ function backtitle() {
   if [ -n "${PRODUCTVER}" ]; then
     BACKTITLE+=" ${PRODUCTVER}"
     if [ -n "${BUILDNUM}" ]; then
-      BACKTITLE+="(${BUILDNUM}$([ ${SMALLNUM:-0} -ne 0 ] && echo "u${SMALLNUM}"))"
+      BACKTITLE+="(${BUILDNUM}$([ "${SMALLNUM:-0}" = "0" ] || echo "u${SMALLNUM:-0}"))"
     else
       BACKTITLE+="(no build)"
     fi
@@ -1450,10 +1448,15 @@ function extractDsmFiles() {
   fi
 
   printf "$(TEXT "Checking hash of %s:")" "${PAT_FILE}"
-  if [ "00000000000000000000000000000000" != "${PATSUM}" ] && [ "$(md5sum "${PAT_PATH}" | awk '{print $1}')" != "${PATSUM}" ]; then
-    rm -f "${PAT_PATH}"
-    echo -e "$(TEXT "md5 hash of pat not match, Please reget pat data from the version menu and try again!")" >"${LOG_FILE}"
-    return 1
+  PATMD5="$(md5sum "${PAT_PATH}" | awk '{print $1}')"
+  if [ "00000000000000000000000000000000" = "${PATSUM}" ]; then
+    PATSUM="${PATMD5}"
+    writeConfigKey "patsum" "${PATMD5}" "${USER_CONFIG_FILE}"
+  else
+    if [ "${PATMD5}" != "${PATSUM}" ]; then
+      echo -e "$(TEXT "md5 hash of pat not match, Please reget pat data from the version menu and try again!")" >"${LOG_FILE}"
+      return 1
+    fi
   fi
   echo "$(TEXT "OK")"
 
@@ -1508,13 +1511,12 @@ function make() {
       fi
       rm -f "${PART1_PATH}/.upgraded"
     fi
-    ${WORK_PATH}/zimage-patch.sh || {
-      printf "%s\n%s\n%s:\n%s\n" "$(TEXT "DSM zImage not patched")" "$(TEXT "Please upgrade the bootloader version and try again.")" "$(TEXT "Error")" "$(cat "${LOG_FILE}")" >"${LOG_FILE}"
-      return 1
-    }
-
     ${WORK_PATH}/ramdisk-patch.sh || {
       printf "%s\n%s\n%s:\n%s\n" "$(TEXT "DSM ramdisk not patched")" "$(TEXT "Please upgrade the bootloader version and try again.")" "$(TEXT "Error")" "$(cat "${LOG_FILE}")" >"${LOG_FILE}"
+      return 1
+    }
+    ${WORK_PATH}/zimage-patch.sh || {
+      printf "%s\n%s\n%s:\n%s\n" "$(TEXT "DSM zImage not patched")" "$(TEXT "Please upgrade the bootloader version and try again.")" "$(TEXT "Error")" "$(cat "${LOG_FILE}")" >"${LOG_FILE}"
       return 1
     }
 
