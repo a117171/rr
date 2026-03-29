@@ -105,6 +105,43 @@ def getpats(workpath, jsonpath, xlsxpath):
         e = arr[2] if len(arr) > 2 else "0"
         return f"{a}.{b}.{c}-{d}-{e}"
 
+    def __walk_payload(node):
+        if isinstance(node, dict):
+            yield node
+            for value in node.values():
+                yield from __walk_payload(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from __walk_payload(item)
+
+    def __get_info_entries(data):
+        info = data.get("info", {})
+        if isinstance(info, dict):
+            return [info]
+        if isinstance(info, list):
+            return [item for item in info if isinstance(item, dict)]
+        return []
+
+    def __get_info_list(data, key):
+        values = []
+        for item in __get_info_entries(data):
+            value = item.get(key, [])
+            if isinstance(value, list):
+                values.extend(value)
+        return values
+
+    def __get_system_item(data):
+        for info in __get_info_entries(data):
+            for item in __walk_payload(info):
+                files = item.get("files")
+                if not isinstance(files, list) or not files:
+                    continue
+                if not isinstance(files[0], dict) or "url" not in files[0]:
+                    continue
+                if all(key in item for key in ("build_ver", "build_num", "nano")):
+                    return item
+        return None
+
     platforms_yml = os.path.join(workpath, "opt", "rr", "platforms.yml")
     with open(platforms_yml, "r") as f:
         data = yaml.safe_load(f)
@@ -169,23 +206,31 @@ def getpats(workpath, jsonpath, xlsxpath):
             click.echo(f"Error: {e}")
             continue
 
-        build_ver = data["info"]["system"]["detail"][0]["items"][0]["build_ver"]
-        build_num = data["info"]["system"]["detail"][0]["items"][0]["build_num"]
-        buildnano = data["info"]["system"]["detail"][0]["items"][0]["nano"]
+        system_item = __get_system_item(data)
+        if not system_item:
+            click.echo(f"Error: Failed to find system release info for {M}")
+            continue
+
+        build_ver = system_item["build_ver"]
+        build_num = system_item["build_num"]
+        buildnano = system_item["nano"]
         V = __fullversion(f"{build_ver}-{build_num}-{buildnano}")
         if V not in pats[M]:
             pats[M][V] = {
-                "url": data["info"]["system"]["detail"][0]["items"][0]["files"][0][
-                    "url"
-                ].split("?")[0],
-                "sum": data["info"]["system"]["detail"][0]["items"][0]["files"][0].get(
-                    "checksum", "0" * 32
-                ),
+                "url": system_item["files"][0]["url"].split("?")[0],
+                "sum": system_item["files"][0].get("checksum", "0" * 32),
             }
 
-        from_ver = min(I["build"] for I in data["info"]["pubVers"])
+        pub_vers = [
+            I["build"]
+            for I in __get_info_list(data, "pubVers")
+            if isinstance(I, dict) and "build" in I
+        ]
+        from_ver = min(pub_vers) if pub_vers else build_num
 
-        for I in data["info"]["productVers"]:
+        for I in __get_info_list(data, "productVers"):
+            if not isinstance(I, dict) or "version" not in I:
+                continue
             if not I["version"].startswith(version):
                 continue
             if not major or not minor:
@@ -211,22 +256,21 @@ def getpats(workpath, jsonpath, xlsxpath):
                     click.echo(f"Error: {e}")
                     continue
 
-                build_ver = dataTmp["info"]["system"]["detail"][0]["items"][0][
-                    "build_ver"
-                ]
-                build_num = dataTmp["info"]["system"]["detail"][0]["items"][0][
-                    "build_num"
-                ]
-                buildnano = dataTmp["info"]["system"]["detail"][0]["items"][0]["nano"]
+                system_item_tmp = __get_system_item(dataTmp)
+                if not system_item_tmp:
+                    click.echo(
+                        f"Error: Failed to find system release info for {M} {I['version']}"
+                    )
+                    continue
+
+                build_ver = system_item_tmp["build_ver"]
+                build_num = system_item_tmp["build_num"]
+                buildnano = system_item_tmp["nano"]
                 V = __fullversion(f"{build_ver}-{build_num}-{buildnano}")
                 if V not in pats[M]:
                     pats[M][V] = {
-                        "url": dataTmp["info"]["system"]["detail"][0]["items"][0][
-                            "files"
-                        ][0]["url"].split("?")[0],
-                        "sum": dataTmp["info"]["system"]["detail"][0]["items"][0][
-                            "files"
-                        ][0].get("checksum", "0" * 32),
+                        "url": system_item_tmp["files"][0]["url"].split("?")[0],
+                        "sum": system_item_tmp["files"][0].get("checksum", "0" * 32),
                     }
 
             for J in I["versions"]:
@@ -330,7 +374,10 @@ def getaddons(workpath, jsonpath, xlsxpath):
 @click.option(
     "-x", "--xlsxpath", type=str, required=False, help="The output path of xlsxfile."
 )
-def getmodules(workpath, jsonpath, xlsxpath):
+@click.option(
+    "-d", "--detailed", is_flag=True, required=False, help="Get detailed info of modules.",
+)
+def getmodules(workpath, jsonpath, xlsxpath, detailed: bool = False):
     MS = glob.glob(os.path.join(workpath, "mnt", "p3", "modules", "*.tgz"))
     MS.sort()
     modules = {}
@@ -343,15 +390,32 @@ def getmodules(workpath, jsonpath, xlsxpath):
         os.makedirs(TMP_PATH)
         with tarfile.open(M, "r") as tar:
             tar.extractall(TMP_PATH)
-        KS = glob.glob(os.path.join(TMP_PATH, "*.ko"))
+        KS = glob.glob(os.path.join(TMP_PATH, "**", "*.ko"), recursive=True)
         KS.sort()
         for K in KS:
             K_name = os.path.splitext(os.path.basename(K))[0]
-            K_path = "" if os.path.basename(os.path.dirname(K)) == M_name else os.path.basename(os.path.dirname(K))
+            K_path = (
+                ""
+                if os.path.basename(os.path.dirname(K)) == "modules"
+                else os.path.basename(os.path.dirname(K)) + "/"
+            )
             K_info = kmodule.modinfo(K, basedir=os.path.dirname(K), kernel=None)[0]
             K_description = K_info.get("description", "")
             K_depends = K_info.get("depends", "")
-            M_modules[K_path + K_name] = {"description": K_description, "depends": K_depends}
+            K_firmware = K_info.get("firmware", "")
+            K_alias = K_info.get("alias", "")
+            if detailed:
+                M_modules[K_path + K_name] = {
+                    "description": K_description,
+                    "depends": K_depends,
+                    "firmware": K_firmware,
+                    "alias": K_alias,
+                }
+            else:
+                M_modules[K_path + K_name] = {
+                    "description": K_description,
+                    "depends": K_depends,
+                }
         modules[M_name] = M_modules
         if os.path.exists(TMP_PATH):
             shutil.rmtree(TMP_PATH)
@@ -361,10 +425,32 @@ def getmodules(workpath, jsonpath, xlsxpath):
     if xlsxpath:
         wb = Workbook()
         ws = wb.active
-        ws.append(["Name", "Arch", "description", "depends"])
-        for k1, v1 in modules.items():
-            for k2, v2 in v1.items():
-                ws.append([k2, k1, v2["description"], v2["depends"]])
+        if detailed:
+            ws.append(["Name", "Arch", "description", "depends", "firmware", "alias"])
+            for k1, v1 in modules.items():
+                for k2, v2 in v1.items():
+                    ws.append(
+                        [
+                            k2,
+                            k1,
+                            str(v2["description"]),
+                            str(v2["depends"]),
+                            str(v2["firmware"]),
+                            str(v2["alias"]),
+                        ]
+                    )
+        else:
+            ws.append(["Name", "Arch", "description", "depends"])
+            for k1, v1 in modules.items():
+                for k2, v2 in v1.items():
+                    ws.append(
+                        [
+                            k2,
+                            k1,
+                            str(v2["description"]),
+                            str(v2["depends"]),
+                        ]
+                    )
         wb.save(xlsxpath)
 
 
